@@ -207,18 +207,18 @@ class FlagValidatorService:
 
         Args:
             model_name: The model name to extract parameters from.
-            declared_parameters: The declared parameter count (in millions).
+            declared_parameters: The declared parameter count (actual count, e.g., 7000000000 for 7B).
             tolerance_percent: Allowed percentage difference (default 10%).
 
         Returns:
             True if there is a mismatch (flag should be set), False otherwise.
 
         Examples:
-            >>> validate_parameter_count("Llama-3-8B", 8000)
+            >>> validate_parameter_count("Llama-3-8B", 8000000000)
             False  # Matches exactly
-            >>> validate_parameter_count("Llama-3-8B", 7000)
+            >>> validate_parameter_count("Llama-3-8B", 7000000000)
             True   # Mismatch (8B != 7B)
-            >>> validate_parameter_count("Llama-3-8B", 8100)
+            >>> validate_parameter_count("Llama-3-8B", 8100000000)
             False  # Within 10% tolerance
         """
         from horde_model_reference.analytics.text_model_parser import extract_parameter_count_from_name
@@ -227,19 +227,22 @@ class FlagValidatorService:
         if declared_parameters is None:
             return False
 
-        # Try to extract parameters from name
-        extracted_params = extract_parameter_count_from_name(model_name)
+        # Try to extract parameters from name (returns in millions)
+        extracted_params_millions = extract_parameter_count_from_name(model_name)
 
         # If we can't extract from name, no mismatch to flag
-        if extracted_params is None:
+        if extracted_params_millions is None:
             return False
 
-        # Calculate percentage difference
-        if declared_parameters == 0:
-            # Avoid division by zero; if declared is 0 but extracted isn't, that's a mismatch
-            return extracted_params != 0
+        # Convert declared parameters to millions for comparison
+        declared_params_millions = declared_parameters / 1_000_000
 
-        diff_percent = abs(extracted_params - declared_parameters) / declared_parameters * 100
+        # Calculate percentage difference
+        if declared_params_millions == 0:
+            # Avoid division by zero; if declared is 0 but extracted isn't, that's a mismatch
+            return extracted_params_millions != 0
+
+        diff_percent = abs(extracted_params_millions - declared_params_millions) / declared_params_millions * 100
 
         # Flag as mismatch if difference exceeds tolerance
         return diff_percent > tolerance_percent
