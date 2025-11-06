@@ -55,6 +55,46 @@ def merge_deletion_flags(flags_list: list[DeletionRiskFlags]) -> DeletionRiskFla
     return merged
 
 
+def detect_variations(model_names: list[str]) -> dict[str, list[str]]:
+    """Detect model variations based on substring matching.
+
+    A model is considered a variation if any model name is a substring of any other model name
+    (case-insensitive). The relationship is bidirectional.
+
+    Args:
+        model_names: List of model names to check for variations.
+
+    Returns:
+        Dictionary mapping each model name to its list of variations (excluding itself).
+
+    Examples:
+        >>> names = ["Broken-Tutu-24B", "Broken-Tutu-24B-Unslop-v2.0", "Mistral-7B"]
+        >>> detect_variations(names)
+        {
+            "Broken-Tutu-24B": ["Broken-Tutu-24B-Unslop-v2.0"],
+            "Broken-Tutu-24B-Unslop-v2.0": ["Broken-Tutu-24B"],
+            "Mistral-7B": []
+        }
+    """
+    variations_map: dict[str, list[str]] = {name: [] for name in model_names}
+
+    for i, name1 in enumerate(model_names):
+        for j, name2 in enumerate(model_names):
+            if i == j:
+                # Skip comparing a name with itself
+                continue
+
+            # Case-insensitive substring matching
+            if name1.lower() in name2.lower():
+                # name1 is a substring of name2, so they are variations
+                if name2 not in variations_map[name1]:
+                    variations_map[name1].append(name2)
+                if name1 not in variations_map[name2]:
+                    variations_map[name2].append(name1)
+
+    return variations_map
+
+
 def merge_usage_trends(trends: list[UsageTrend], weights: list[int]) -> UsageTrend:
     """Merge usage trends using weighted average.
 
@@ -95,13 +135,14 @@ def group_audit_models(models: list[ModelAuditInfo]) -> list[ModelAuditInfo]:
     """Group text model variants by base name and aggregate metrics.
 
     Combines multiple quantization variants (Q4_K_M, Q5_0, etc.) into a single
-    model entry with aggregated metrics.
+    model entry with aggregated metrics. Also detects and populates variations
+    based on substring matching of model names.
 
     Args:
         models: List of ModelAuditInfo objects to group.
 
     Returns:
-        List of grouped ModelAuditInfo objects with aggregated metrics.
+        List of grouped ModelAuditInfo objects with aggregated metrics and variations.
     """
     from horde_model_reference.analytics.audit_analysis import ModelAuditInfo
 
@@ -115,10 +156,17 @@ def group_audit_models(models: list[ModelAuditInfo]) -> list[ModelAuditInfo]:
             grouped[base_name] = []
         grouped[base_name].append(model)
 
+    # Detect variations among all model names (using base names for grouped models)
+    all_model_names = [base_name for base_name in grouped.keys()]
+    variations_map = detect_variations(all_model_names)
+
     result: list[ModelAuditInfo] = []
     for base_name, variants in grouped.items():
         if len(variants) == 1:
-            result.append(variants[0])
+            # Single variant - set variations from the map
+            single_model = variants[0]
+            single_model.variations = variations_map.get(base_name, [])
+            result.append(single_model)
             continue
 
         logger.debug(f"Grouping {len(variants)} variants of '{base_name}'")
@@ -150,6 +198,11 @@ def group_audit_models(models: list[ModelAuditInfo]) -> list[ModelAuditInfo]:
         if avg_size_gb and avg_size_gb > 0:
             cost_benefit = total_usage_month / avg_size_gb
 
+        # Get variations for this base name, but format them as "(grouped)" if needed
+        model_variations = variations_map.get(base_name, [])
+        formatted_variations = [f"{var} (grouped)" if var in grouped and len(grouped[var]) > 1 else var
+                                for var in model_variations]
+
         grouped_model = ModelAuditInfo(
             name=f"{base_name} (grouped)",
             category=first_variant.category,
@@ -171,6 +224,7 @@ def group_audit_models(models: list[ModelAuditInfo]) -> list[ModelAuditInfo]:
             has_description=all(v.has_description for v in variants),
             download_count=sum(v.download_count for v in variants),
             download_hosts=all_hosts,
+            variations=formatted_variations,
         )
 
         result.append(grouped_model)

@@ -407,6 +407,8 @@ class ModelAuditInfo(BaseModel):
     """Number of download entries."""
     download_hosts: list[str] = Field(default_factory=list)
     """List of download host domains."""
+    variations: list[str] = Field(default_factory=list)
+    """List of model names that are variations of this model (substring matches)."""
 
     @property
     def flag_count(self) -> int:
@@ -913,6 +915,7 @@ class ModelAuditInfoHandler:
         baseline: str | None,
         nsfw: bool | None,
         size_bytes: int | None,
+        variations: list[str] | None = None,
     ) -> ModelAuditInfo:
         """Build ModelAuditInfo from common components.
 
@@ -926,6 +929,7 @@ class ModelAuditInfoHandler:
             baseline: Model baseline (if applicable).
             nsfw: Whether model is NSFW (if applicable).
             size_bytes: Model size in bytes (if available).
+            variations: List of model names that are variations (substring matches).
 
         Returns:
             ModelAuditInfo object.
@@ -1007,6 +1011,7 @@ class ModelAuditInfoHandler:
             has_description=has_description,
             download_count=download_count,
             download_hosts=download_hosts,
+            variations=variations or [],
         )
 
 

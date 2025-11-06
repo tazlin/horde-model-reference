@@ -17,6 +17,7 @@ from horde_model_reference.analytics.audit_analysis import (
 )
 from horde_model_reference.analytics.text_model_grouping import (
     apply_text_model_grouping_to_audit,
+    detect_variations,
     group_audit_models,
     merge_deletion_flags,
     merge_usage_trends,
@@ -529,3 +530,203 @@ class TestApplyTextModelGroupingToAudit:
         assert result.total_count == 2
         # returned_count should reflect grouped count
         assert result.returned_count == 1
+
+
+class TestDetectVariations:
+    """Test variation detection based on substring matching."""
+
+    def test_empty_list(self) -> None:
+        """Empty list should return empty dict."""
+        result = detect_variations([])
+        assert result == {}
+
+    def test_single_model(self) -> None:
+        """Single model should have no variations."""
+        result = detect_variations(["Llama-2-7B"])
+        assert result == {"Llama-2-7B": []}
+
+    def test_no_variations(self) -> None:
+        """Models with no substring relationships should have empty variations."""
+        result = detect_variations(["Llama-2-7B", "Mistral-7B", "GPT-3"])
+        assert result == {
+            "Llama-2-7B": [],
+            "Mistral-7B": [],
+            "GPT-3": [],
+        }
+
+    def test_simple_substring_match(self) -> None:
+        """Basic substring matching should create bidirectional variations."""
+        result = detect_variations(["Broken-Tutu-24B", "Broken-Tutu-24B-Unslop-v2.0"])
+        assert result == {
+            "Broken-Tutu-24B": ["Broken-Tutu-24B-Unslop-v2.0"],
+            "Broken-Tutu-24B-Unslop-v2.0": ["Broken-Tutu-24B"],
+        }
+
+    def test_multiple_variations(self) -> None:
+        """One model can be a substring of multiple others."""
+        result = detect_variations([
+            "Broken-Tutu-24B",
+            "Broken-Tutu-24B-Unslop-v2.0",
+            "Broken-Tutu-24B-Transgression-v2.0",
+        ])
+        assert "Broken-Tutu-24B-Unslop-v2.0" in result["Broken-Tutu-24B"]
+        assert "Broken-Tutu-24B-Transgression-v2.0" in result["Broken-Tutu-24B"]
+        assert len(result["Broken-Tutu-24B"]) == 2
+        assert result["Broken-Tutu-24B-Unslop-v2.0"] == ["Broken-Tutu-24B"]
+        assert result["Broken-Tutu-24B-Transgression-v2.0"] == ["Broken-Tutu-24B"]
+
+    def test_case_insensitive_matching(self) -> None:
+        """Substring matching should be case-insensitive."""
+        result = detect_variations(["broken-tutu-24b", "Broken-Tutu-24B-Unslop-v2.0"])
+        assert "Broken-Tutu-24B-Unslop-v2.0" in result["broken-tutu-24b"]
+        assert "broken-tutu-24b" in result["Broken-Tutu-24B-Unslop-v2.0"]
+
+    def test_complex_variations(self) -> None:
+        """Test with complex variation patterns."""
+        result = detect_variations([
+            "Llama-2-7B",
+            "Llama-2-7B-Chat",
+            "Llama-2-7B-Chat-GGUF",
+            "Mistral-7B",
+        ])
+        # Llama-2-7B is a substring of both Chat variants
+        assert set(result["Llama-2-7B"]) == {"Llama-2-7B-Chat", "Llama-2-7B-Chat-GGUF"}
+        # Llama-2-7B-Chat is a substring of GGUF variant
+        assert set(result["Llama-2-7B-Chat"]) == {"Llama-2-7B", "Llama-2-7B-Chat-GGUF"}
+        # GGUF variant has both as variations
+        assert set(result["Llama-2-7B-Chat-GGUF"]) == {"Llama-2-7B", "Llama-2-7B-Chat"}
+        # Mistral has no variations
+        assert result["Mistral-7B"] == []
+
+    def test_no_duplicates_in_variations(self) -> None:
+        """Variations list should not contain duplicates."""
+        result = detect_variations(["Model-A", "Model-A-v2"])
+        # Each model should appear only once in the other's variations
+        assert result["Model-A"].count("Model-A-v2") == 1
+        assert result["Model-A-v2"].count("Model-A") == 1
+
+
+class TestGroupAuditModelsWithVariations:
+    """Test that grouping populates the variations field."""
+
+    def test_single_model_no_variations(self) -> None:
+        """Single model with no variations should have empty variations list."""
+        model = ModelAuditInfo(
+            name="unique-model-7b",
+            category=MODEL_REFERENCE_CATEGORY.text_generation,
+            deletion_risk_flags=DeletionRiskFlags(),
+            at_risk=False,
+            risk_score=0,
+            worker_count=10,
+            usage_day=100,
+            usage_month=3000,
+            usage_total=50000,
+            usage_percentage_of_category=5.0,
+            usage_trend=UsageTrend(),
+        )
+        result = group_audit_models([model])
+        assert len(result) == 1
+        assert result[0].variations == []
+
+    def test_models_with_variations(self) -> None:
+        """Models with substring matches should have variations populated."""
+        model1 = ModelAuditInfo(
+            name="Broken-Tutu-24B",
+            category=MODEL_REFERENCE_CATEGORY.text_generation,
+            deletion_risk_flags=DeletionRiskFlags(),
+            at_risk=False,
+            risk_score=0,
+            worker_count=5,
+            usage_day=50,
+            usage_month=1500,
+            usage_total=25000,
+            usage_percentage_of_category=2.5,
+            usage_trend=UsageTrend(),
+        )
+        model2 = ModelAuditInfo(
+            name="Broken-Tutu-24B-Unslop-v2.0",
+            category=MODEL_REFERENCE_CATEGORY.text_generation,
+            deletion_risk_flags=DeletionRiskFlags(),
+            at_risk=False,
+            risk_score=0,
+            worker_count=8,
+            usage_day=80,
+            usage_month=2400,
+            usage_total=40000,
+            usage_percentage_of_category=4.0,
+            usage_trend=UsageTrend(),
+        )
+        result = group_audit_models([model1, model2])
+        assert len(result) == 2
+        # Find the models in the result
+        tutu_model = next(m for m in result if "Unslop" not in m.name)
+        unslop_model = next(m for m in result if "Unslop" in m.name)
+        # Check variations are populated (variations use base names)
+        assert "Broken-Tutu-Unslop-v2.0" in tutu_model.variations
+        assert "Broken-Tutu" in unslop_model.variations
+
+    def test_grouped_models_with_variations(self) -> None:
+        """Grouped models should show variations with (grouped) suffix."""
+        model1 = ModelAuditInfo(
+            name="Broken-Tutu-24B-Q4",
+            category=MODEL_REFERENCE_CATEGORY.text_generation,
+            deletion_risk_flags=DeletionRiskFlags(),
+            at_risk=False,
+            risk_score=0,
+            worker_count=5,
+            usage_day=50,
+            usage_month=1500,
+            usage_total=25000,
+            usage_percentage_of_category=2.5,
+            usage_trend=UsageTrend(),
+        )
+        model2 = ModelAuditInfo(
+            name="Broken-Tutu-24B-Q8",
+            category=MODEL_REFERENCE_CATEGORY.text_generation,
+            deletion_risk_flags=DeletionRiskFlags(),
+            at_risk=False,
+            risk_score=0,
+            worker_count=8,
+            usage_day=80,
+            usage_month=2400,
+            usage_total=40000,
+            usage_percentage_of_category=4.0,
+            usage_trend=UsageTrend(),
+        )
+        model3 = ModelAuditInfo(
+            name="Broken-Tutu-24B-Unslop-v2.0-Q4",
+            category=MODEL_REFERENCE_CATEGORY.text_generation,
+            deletion_risk_flags=DeletionRiskFlags(),
+            at_risk=False,
+            risk_score=0,
+            worker_count=3,
+            usage_day=30,
+            usage_month=900,
+            usage_total=15000,
+            usage_percentage_of_category=1.5,
+            usage_trend=UsageTrend(),
+        )
+        model4 = ModelAuditInfo(
+            name="Broken-Tutu-24B-Unslop-v2.0-Q8",
+            category=MODEL_REFERENCE_CATEGORY.text_generation,
+            deletion_risk_flags=DeletionRiskFlags(),
+            at_risk=False,
+            risk_score=0,
+            worker_count=6,
+            usage_day=60,
+            usage_month=1800,
+            usage_total=30000,
+            usage_percentage_of_category=3.0,
+            usage_trend=UsageTrend(),
+        )
+        result = group_audit_models([model1, model2, model3, model4])
+        # Should have 2 grouped models
+        assert len(result) == 2
+        # Both should be marked as grouped
+        assert all("grouped" in m.name.lower() for m in result)
+        # Find the base and unslop grouped models (base names)
+        tutu_grouped = next(m for m in result if "Broken-Tutu (grouped)" == m.name)
+        unslop_grouped = next(m for m in result if "Broken-Tutu-Unslop-v2.0 (grouped)" == m.name)
+        # Check variations include the (grouped) suffix
+        assert "Broken-Tutu-Unslop-v2.0 (grouped)" in tutu_grouped.variations
+        assert "Broken-Tutu (grouped)" in unslop_grouped.variations
