@@ -67,6 +67,8 @@ class DeletionRiskFlags(BaseModel):
     """Model lacks baseline information (for applicable categories)."""
     low_usage: bool = False
     """Model has very low usage (threshold defined by LOW_USAGE_THRESHOLD constant)."""
+    parameter_mismatch: bool = False
+    """Model parameter count in name doesn't match parameters field in record."""
 
     def any_flags(self) -> bool:
         """Check if any deletion risk flags are set.
@@ -87,6 +89,7 @@ class DeletionRiskFlags(BaseModel):
                 self.missing_description,
                 self.missing_baseline,
                 self.low_usage,
+                self.parameter_mismatch,
             ]
         )
 
@@ -109,6 +112,7 @@ class DeletionRiskFlags(BaseModel):
                 self.missing_description,
                 self.missing_baseline,
                 self.low_usage,
+                self.parameter_mismatch,
             ]
         )
 
@@ -191,6 +195,56 @@ class FlagValidatorService:
         return not baseline
 
     @staticmethod
+    def validate_parameter_count(
+        model_name: str,
+        declared_parameters: int | None,
+        tolerance_percent: float = 10.0,
+    ) -> bool:
+        """Validate that parameter count in name matches declared parameters.
+
+        Extracts parameter count from model name (e.g., "7B", "13B") and compares
+        to the declared parameters field with a tolerance for rounding differences.
+
+        Args:
+            model_name: The model name to extract parameters from.
+            declared_parameters: The declared parameter count (in millions).
+            tolerance_percent: Allowed percentage difference (default 10%).
+
+        Returns:
+            True if there is a mismatch (flag should be set), False otherwise.
+
+        Examples:
+            >>> validate_parameter_count("Llama-3-8B", 8000)
+            False  # Matches exactly
+            >>> validate_parameter_count("Llama-3-8B", 7000)
+            True   # Mismatch (8B != 7B)
+            >>> validate_parameter_count("Llama-3-8B", 8100)
+            False  # Within 10% tolerance
+        """
+        from horde_model_reference.analytics.text_model_parser import extract_parameter_count_from_name
+
+        # If no declared parameters, we can't validate
+        if declared_parameters is None:
+            return False
+
+        # Try to extract parameters from name
+        extracted_params = extract_parameter_count_from_name(model_name)
+
+        # If we can't extract from name, no mismatch to flag
+        if extracted_params is None:
+            return False
+
+        # Calculate percentage difference
+        if declared_parameters == 0:
+            # Avoid division by zero; if declared is 0 but extracted isn't, that's a mismatch
+            return extracted_params != 0
+
+        diff_percent = abs(extracted_params - declared_parameters) / declared_parameters * 100
+
+        # Flag as mismatch if difference exceeds tolerance
+        return diff_percent > tolerance_percent
+
+    @staticmethod
     def validate_statistics(
         statistics: CombinedModelStatistics | None,
         category_total_usage: int,
@@ -258,6 +312,7 @@ class DeletionRiskFlagsBuilder:
         self.missing_description: bool = False
         self.missing_baseline: bool = False
         self.low_usage: bool = False
+        self.parameter_mismatch: bool = False
 
     def with_download_flags(
         self,
@@ -307,6 +362,18 @@ class DeletionRiskFlagsBuilder:
         self.missing_baseline = missing
         return self
 
+    def with_parameter_mismatch(self, mismatch: bool) -> DeletionRiskFlagsBuilder:
+        """Set parameter_mismatch flag.
+
+        Args:
+            mismatch: Whether parameter count in name doesn't match declared parameters.
+
+        Returns:
+            Self for method chaining.
+        """
+        self.parameter_mismatch = mismatch
+        return self
+
     def with_statistics_flags(
         self,
         zero_usage_day: bool,
@@ -352,6 +419,7 @@ class DeletionRiskFlagsBuilder:
             missing_description=self.missing_description,
             missing_baseline=self.missing_baseline,
             low_usage=self.low_usage,
+            parameter_mismatch=self.parameter_mismatch,
         )
 
 
@@ -583,6 +651,7 @@ class DeletionRiskFlagsHandler:
     def create_flags(
         self,
         *,
+        model_name: str,
         model_record: GenericModelRecord,
         statistics: CombinedModelStatistics | None,
         category_total_usage: int,
@@ -590,6 +659,7 @@ class DeletionRiskFlagsHandler:
         """Create DeletionRiskFlags for a model record.
 
         Args:
+            model_name: The name of the model.
             model_record: The model record.
             statistics: Optional Horde API statistics.
             category_total_usage: Total monthly usage for the category.
@@ -644,6 +714,7 @@ class ImageGenerationDeletionRiskFlagsHandler(DeletionRiskFlagsHandler):
     def create_flags(
         self,
         *,
+        model_name: str,
         model_record: GenericModelRecord,
         statistics: CombinedModelStatistics | None,
         category_total_usage: int,
@@ -651,6 +722,7 @@ class ImageGenerationDeletionRiskFlagsHandler(DeletionRiskFlagsHandler):
         """Create DeletionRiskFlags for an image generation model.
 
         Args:
+            model_name: The name of the model.
             model_record: The image generation model record.
             statistics: Optional Horde API statistics.
             category_total_usage: Total monthly usage for the category.
@@ -681,6 +753,7 @@ class TextGenerationDeletionRiskFlagsHandler(DeletionRiskFlagsHandler):
 
     def _create_flags_impl(
         self,
+        model_name: str,
         model_record: TextGenerationModelRecord,
         statistics: CombinedModelStatistics | None,
         category_total_usage: int,
@@ -688,6 +761,7 @@ class TextGenerationDeletionRiskFlagsHandler(DeletionRiskFlagsHandler):
         """Analyze a text generation model and determine deletion risk flags.
 
         Args:
+            model_name: The name of the model.
             model_record: Typed text generation model record.
             statistics: Optional Horde API statistics (worker_count, usage_stats).
             category_total_usage: Total monthly usage for the category (for percentage calculations).
@@ -703,12 +777,16 @@ class TextGenerationDeletionRiskFlagsHandler(DeletionRiskFlagsHandler):
             .with_missing_description(FlagValidatorService.validate_description(model_record.description))
             .with_missing_baseline(FlagValidatorService.validate_baseline(model_record.baseline))
             .with_statistics_flags(*FlagValidatorService.validate_statistics(statistics, category_total_usage))
+            .with_parameter_mismatch(
+                FlagValidatorService.validate_parameter_count(model_name, model_record.parameters_count)
+            )
             .build()
         )
 
     def create_flags(
         self,
         *,
+        model_name: str,
         model_record: GenericModelRecord,
         statistics: CombinedModelStatistics | None,
         category_total_usage: int,
@@ -716,6 +794,7 @@ class TextGenerationDeletionRiskFlagsHandler(DeletionRiskFlagsHandler):
         """Create DeletionRiskFlags for a text generation model.
 
         Args:
+            model_name: The name of the model.
             model_record: The text generation model record.
             statistics: Optional Horde API statistics.
             category_total_usage: Total monthly usage for the category.
@@ -727,7 +806,7 @@ class TextGenerationDeletionRiskFlagsHandler(DeletionRiskFlagsHandler):
             error_message = f"Expected TextGenerationModelRecord, got {type(model_record).__name__}"
             raise TypeError(error_message)
 
-        return self._create_flags_impl(model_record, statistics, category_total_usage)
+        return self._create_flags_impl(model_name, model_record, statistics, category_total_usage)
 
 
 class GenericDeletionRiskFlagsHandler(DeletionRiskFlagsHandler):
@@ -749,6 +828,7 @@ class GenericDeletionRiskFlagsHandler(DeletionRiskFlagsHandler):
     def create_flags(
         self,
         *,
+        model_name: str,
         model_record: GenericModelRecord,
         statistics: CombinedModelStatistics | None,
         category_total_usage: int,
@@ -756,6 +836,7 @@ class GenericDeletionRiskFlagsHandler(DeletionRiskFlagsHandler):
         """Create DeletionRiskFlags for a generic/unsupported model type.
 
         Args:
+            model_name: The name of the model.
             model_record: The generic model record.
             statistics: Optional Horde API statistics.
             category_total_usage: Total monthly usage for the category.
@@ -834,6 +915,7 @@ class DeletionRiskFlagsFactory:
     def create_flags(
         self,
         *,
+        model_name: str,
         model_record: GenericModelRecord,
         statistics: CombinedModelStatistics | None,
         category_total_usage: int,
@@ -841,6 +923,7 @@ class DeletionRiskFlagsFactory:
         """Create DeletionRiskFlags for a model record using the appropriate handler.
 
         Args:
+            model_name: The name of the model.
             model_record: The model record.
             statistics: Optional Horde API statistics.
             category_total_usage: Total monthly usage for the category.
@@ -854,6 +937,7 @@ class DeletionRiskFlagsFactory:
         for handler in self._handlers:
             if handler.can_handle(model_record):
                 return handler.create_flags(
+                    model_name=model_name,
                     model_record=model_record,
                     statistics=statistics,
                     category_total_usage=category_total_usage,
@@ -1064,6 +1148,7 @@ class ImageGenerationModelAuditHandler(ModelAuditInfoHandler):
             raise TypeError(error_message)
 
         flags = self._flags_factory.create_flags(
+            model_name=model_name,
             model_record=model_record,
             statistics=statistics,
             category_total_usage=category_total_usage,
@@ -1134,6 +1219,7 @@ class TextGenerationModelAuditHandler(ModelAuditInfoHandler):
             raise TypeError(error_message)
 
         flags = self._flags_factory.create_flags(
+            model_name=model_name,
             model_record=model_record,
             statistics=statistics,
             category_total_usage=category_total_usage,
@@ -1197,6 +1283,7 @@ class GenericModelAuditHandler(ModelAuditInfoHandler):
         # Use DeletionRiskFlagsFactory for flag creation
         flags_factory = DeletionRiskFlagsFactory.create_default()
         flags = flags_factory.create_flags(
+            model_name=model_name,
             model_record=model_record,
             statistics=statistics,
             category_total_usage=category_total_usage,

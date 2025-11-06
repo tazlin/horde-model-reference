@@ -51,6 +51,7 @@ def merge_deletion_flags(flags_list: list[DeletionRiskFlags]) -> DeletionRiskFla
     merged.missing_description = any(f.missing_description for f in flags_list)
     merged.missing_baseline = any(f.missing_baseline for f in flags_list)
     merged.low_usage = any(f.low_usage for f in flags_list)
+    merged.parameter_mismatch = any(f.parameter_mismatch for f in flags_list)
 
     return merged
 
