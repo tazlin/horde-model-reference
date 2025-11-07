@@ -285,3 +285,83 @@ def get_model_variant(model_name: str) -> str | None:
     """
     parsed = parse_text_model_name(model_name)
     return parsed.variant
+
+
+def parse_parameter_count_from_size(size_str: str) -> int | None:
+    """Convert a model size string to parameter count in millions.
+
+    Args:
+        size_str: Size string like "7B", "13B", "70B", "1.5B", "8x7B", etc.
+
+    Returns:
+        Parameter count in millions, or None if cannot parse.
+
+    Examples:
+        >>> parse_parameter_count_from_size("7B")
+        7000
+        >>> parse_parameter_count_from_size("1.5B")
+        1500
+        >>> parse_parameter_count_from_size("8x7B")
+        56000
+        >>> parse_parameter_count_from_size("500M")
+        500
+        >>> parse_parameter_count_from_size("3.5K")
+        None
+    """
+    if not size_str:
+        return None
+
+    size_str = size_str.upper().strip()
+
+    # Handle MoE models (e.g., "8x7B" = 8 experts * 7B each)
+    moe_match = re.match(r"^(\d+)X(\d+\.?\d*)([BMK])$", size_str)
+    if moe_match:
+        num_experts = int(moe_match.group(1))
+        param_value = float(moe_match.group(2))
+        unit = moe_match.group(3)
+
+        if unit == "B":
+            return int(num_experts * param_value * 1000)
+        elif unit == "M":
+            return int(num_experts * param_value)
+        # K (thousands) not typically used for model parameters
+        return None
+
+    # Handle regular sizes (e.g., "7B", "1.5B", "500M")
+    regular_match = re.match(r"^(\d+\.?\d*)([BMK])$", size_str)
+    if regular_match:
+        param_value = float(regular_match.group(1))
+        unit = regular_match.group(2)
+
+        if unit == "B":
+            return int(param_value * 1000)
+        elif unit == "M":
+            return int(param_value)
+        # K (thousands) not typically used for model parameters
+        return None
+
+    return None
+
+
+@lru_cache(maxsize=2048)
+def extract_parameter_count_from_name(model_name: str) -> int | None:
+    """Extract parameter count from model name.
+
+    Args:
+        model_name: The model name to parse.
+
+    Returns:
+        Parameter count in millions, or None if not found or cannot parse.
+
+    Examples:
+        >>> extract_parameter_count_from_name("Llama-3-8B-Instruct")
+        8000
+        >>> extract_parameter_count_from_name("Mixtral-8x7B-Instruct-v0.1")
+        56000
+        >>> extract_parameter_count_from_name("GPT-4")
+        None
+    """
+    size_str = get_model_size(model_name)
+    if not size_str:
+        return None
+    return parse_parameter_count_from_size(size_str)
